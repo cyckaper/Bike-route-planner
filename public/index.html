@@ -1,5 +1,4 @@
 <!DOCTYPE html>
-
 <html lang="zh-Hant-TW">
 <head>
 <meta charset="UTF-8" />
@@ -38,7 +37,6 @@
   </details>
 
   <!-- ① 輸入 -->
-
   <section class="card input-card">
     <h2>① 貼上你的騎乘計畫</h2>
     <p class="hint">用一段話描述出發日期與依序要去或停留的地點即可，文字可以很隨意。下一步會讓你確認辨識出的地點。</p>
@@ -58,7 +56,6 @@
   </section>
 
   <!-- ② 確認地點 -->
-
   <section class="card confirm-card" id="confirmCard" hidden>
     <h2>② 確認地點</h2>
     <p class="hint">以下是自動辨識的地點（一行一個，依騎乘順序）。請檢查、修正錯字、刪掉不是地點的項目、補上漏掉的，或調整順序。若某地名查不到，可改寫得更完整（例如「基隆」→「基隆火車站」）。</p>
@@ -69,44 +66,40 @@
   </section>
 
   <!-- 進度 -->
-
   <div id="status" class="status" hidden></div>
 
   <!-- 結果 -->
-
   <section id="results" hidden>
 
-```
-<div class="card map-card">
-  <h2>路線地圖</h2>
-  <div id="map"></div>
-</div>
+    <div class="card map-card">
+      <h2>路線地圖</h2>
+      <div id="map"></div>
+    </div>
 
-<div class="card summary-card">
-  <h2>行程總覽</h2>
-  <div id="summary" class="summary-grid"></div>
-  <p id="approxNote" class="note tiny"></p>
-</div>
+    <div class="card summary-card">
+      <h2>行程總覽</h2>
+      <div id="summary" class="summary-grid"></div>
+      <p id="approxNote" class="note tiny"></p>
+    </div>
 
-<div class="card">
-  <h2>③ 地點與導覽</h2>
-  <div class="btn-row">
-    <button id="playAllBtn" class="btn ghost" type="button">▶ 播放全程語音導覽</button>
-    <button id="stopAllBtn" class="btn ghost" type="button">■ 停止</button>
-  </div>
-  <div id="places"></div>
-</div>
+    <div class="card">
+      <h2>③ 地點與導覽</h2>
+      <div class="btn-row">
+        <button id="playAllBtn" class="btn ghost" type="button">▶ 播放全程語音導覽</button>
+        <button id="stopAllBtn" class="btn ghost" type="button">■ 停止</button>
+      </div>
+      <div id="places"></div>
+    </div>
 
-<div class="card">
-  <h2>④ 路段距離與坡度</h2>
-  <div id="segments"></div>
-</div>
+    <div class="card">
+      <h2>④ 路段距離與坡度</h2>
+      <div id="segments"></div>
+    </div>
 
-<div class="card">
-  <h2>⑤ 難度比較 · 與大眾單車路線</h2>
-  <div id="difficulty"></div>
-</div>
-```
+    <div class="card">
+      <h2>⑤ 難度比較 · 與大眾單車路線</h2>
+      <div id="difficulty"></div>
+    </div>
 
   </section>
 </main>
@@ -117,8 +110,6 @@
 </footer>
 
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" crossorigin=""></script>
-
 <script src="app.js"></script>
-
 </body>
 </html>

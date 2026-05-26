@@ -1,0 +1,10 @@
+# Netlify 發佈設定 —— 純靜態網站，無需建置步驟
+[build]
+  publish = "."
+  command = ""
+
+[[headers]]
+  for = "/*"
+  [headers.values]
+    X-Content-Type-Options = "nosniff"
+    Referrer-Policy = "strict-origin-when-cross-origin"

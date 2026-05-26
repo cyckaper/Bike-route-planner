@@ -1,0 +1,117 @@
+<!DOCTYPE html>
+<html lang="zh-Hant-TW">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>小摺旅路 · Brompton 路線規劃</title>
+<meta name="description" content="輸入一段騎乘計畫文字，自動萃取地點、定位 GPS、產生語音導覽、計算距離與坡度、查詢當日天氣，並與大眾單車路線比較難度。" />
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link href="https://fonts.googleapis.com/css2?family=Fraunces:ital,opsz,wght@0,9..144,400;0,9..144,600;1,9..144,400&family=Noto+Sans+TC:wght@400;500;700&family=Noto+Serif+TC:wght@500;700&display=swap" rel="stylesheet" />
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY=" crossorigin="" />
+<link rel="stylesheet" href="style.css" />
+</head>
+<body>
+<div class="grain"></div>
+
+<header class="site-head">
+  <div class="head-mark">⟿</div>
+  <div>
+    <h1>小摺旅路</h1>
+    <p class="sub">Brompton Riverside Route Planner — 騎乘計畫文字 → 地點 · 導覽 · 坡度 · 天氣</p>
+  </div>
+</header>
+
+<main>
+  <!-- 設定 -->
+  <details class="card config">
+    <summary>設定（選用）· Google Maps API 金鑰</summary>
+    <div class="config-body">
+      <p class="note">
+        預設使用 OpenStreetMap（Nominatim）免費定位與 Open-Meteo 高程資料，<strong>不需任何金鑰即可使用</strong>。
+        若你想改用 Google Maps 的定位與高程（精度通常較高），可在下方貼上 Google Maps JavaScript API 金鑰；
+        金鑰會留在你的瀏覽器，不會上傳。建議在 Google Cloud Console 將金鑰限制在你的 Netlify 網域。
+      </p>
+      <label for="gkey">Google Maps API 金鑰</label>
+      <input id="gkey" type="text" placeholder="貼上金鑰以改用 Google 定位／高程（可留空）" autocomplete="off" spellcheck="false" />
+    </div>
+  </details>
+
+  <!-- 輸入 -->
+  <section class="card input-card">
+    <h2>① 貼上你的騎乘計畫</h2>
+    <p class="hint">用一段話描述出發日期、依序要去或停留的地點。例如以「從…出發、騎到…、再到…、最後抵達…」串接。</p>
+    <textarea id="tripText" rows="5" placeholder="例：2026年6月7日，從大稻埕碼頭出發，沿淡水河右岸自行車道騎到關渡宮，接著前往淡水老街，最後抵達淡水漁人碼頭。"></textarea>
+    <div class="opt-row">
+      <label for="profile">路線偏好</label>
+      <select id="profile">
+        <option value="trekking">休閒車道優先（推薦小摺河濱）</option>
+        <option value="fastbike">一般道路較快</option>
+        <option value="shortest">最短距離</option>
+      </select>
+    </div>
+    <div class="btn-row">
+      <button id="exampleBtn" class="btn ghost" type="button">填入範例</button>
+      <button id="planBtn" class="btn primary" type="button">規劃路線 →</button>
+    </div>
+  </section>
+
+  <!-- 進度 -->
+  <div id="status" class="status" hidden></div>
+
+  <!-- 結果 -->
+  <section id="results" hidden>
+
+    <!-- 地圖 -->
+    <div class="card map-card">
+      <h2>路線地圖</h2>
+      <div id="map"></div>
+    </div>
+
+    <!-- 行程總覽 -->
+    <div class="card summary-card">
+      <h2>行程總覽</h2>
+      <div id="summary" class="summary-grid"></div>
+      <p id="approxNote" class="note tiny"></p>
+    </div>
+
+    <!-- 地點 -->
+    <div class="card">
+      <h2>② 地點與導覽</h2>
+      <div class="btn-row">
+        <button id="playAllBtn" class="btn ghost" type="button">▶ 播放全程語音導覽</button>
+        <button id="stopAllBtn" class="btn ghost" type="button">■ 停止</button>
+      </div>
+      <div id="places"></div>
+    </div>
+
+    <!-- 路段 -->
+    <div class="card">
+      <h2>③ 路段距離與坡度</h2>
+      <div id="segments"></div>
+    </div>
+
+    <!-- 天氣 -->
+    <div class="card">
+      <h2>④ 出發當日天氣</h2>
+      <div id="weather" class="weather-grid"></div>
+    </div>
+
+    <!-- 難度比較 -->
+    <div class="card">
+      <h2>⑤ 難度比較 · 與大眾單車路線</h2>
+      <div id="difficulty"></div>
+    </div>
+
+  </section>
+</main>
+
+<footer class="site-foot">
+  <p>資料來源：OpenStreetMap / Nominatim · BRouter 單車路網 · Open-Meteo · 維基百科。語音為瀏覽器內建合成語音。</p>
+  <p class="tiny">距離與坡度依實際單車道路路線計算；少數無法規劃路線處以直線推估並標註。僅供行前評估參考。</p>
+</footer>
+
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" crossorigin=""></script>
+<script src="app.js"></script>
+</body>
+</html>

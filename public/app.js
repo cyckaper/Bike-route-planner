@@ -126,29 +126,69 @@ function loadGoogle(key) {
     document.head.appendChild(s);
   });
 }
-async function geocodeNominatim(name) {
-  const url = `https://nominatim.openstreetmap.org/search?q=${encodeURIComponent(name + ' 台灣')}` +
+async function nominatimSearch(name, viewbox) {
+  let url = `https://nominatim.openstreetmap.org/search?q=${encodeURIComponent(name + ' 台灣')}` +
     `&format=json&limit=1&accept-language=zh-TW&countrycodes=tw`;
-  const j = await (await fetch(url, { headers: { Accept: 'application/json' } })).json();
-  if (!j.length) return null;
-  return { lat: +j[0].lat, lon: +j[0].lon };
+  if (viewbox) url += `&viewbox=${viewbox}&bounded=1`;
+  try {
+    const j = await (await fetch(url, { headers: { Accept: 'application/json' } })).json();
+    if (!j.length) return null;
+    return { lat: +j[0].lat, lon: +j[0].lon };
+  } catch { return null; }
 }
-function geocodeGoogle(name) {
+function googleSearch(name, bounds) {
   return new Promise(res => {
-    new google.maps.Geocoder().geocode(
-      { address: name, region: 'tw', componentRestrictions: { country: 'TW' } },
-      (r, status) => {
-        if (status === 'OK' && r[0]) {
-          const l = r[0].geometry.location;
-          res({ lat: l.lat(), lon: l.lng() });
-        } else res(null);
-      });
+    const req = { address: name, region: 'tw', componentRestrictions: { country: 'TW' } };
+    if (bounds) req.bounds = bounds;
+    new google.maps.Geocoder().geocode(req, (r, st) => {
+      if (st === 'OK' && r[0]) {
+        const l = r[0].geometry.location;
+        res({ lat: l.lat(), lon: l.lng() });
+      } else res(null);
+    });
   });
 }
-async function geocode(name) {
-  try {
-    return googleReady ? await geocodeGoogle(name) : await geocodeNominatim(name);
-  } catch { return null; }
+// 單點定位，可帶中心點做區域偏好／限制
+async function geocodeOne(name, center) {
+  const d = 0.5; // 約 55 公里範圍框
+  if (googleReady) {
+    let b = null;
+    if (center) b = new google.maps.LatLngBounds(
+      { lat: center.lat - d, lng: center.lon - d },
+      { lat: center.lat + d, lng: center.lon + d });
+    try { return await googleSearch(name, b); } catch { return null; }
+  }
+  const vb = center
+    ? `${center.lon - d},${center.lat + d},${center.lon + d},${center.lat - d}` : null;
+  return await nominatimSearch(name, vb);
+}
+// 全部定位：初步定位 → 找最密集群集為錨點 → 偏離者用錨點區域重新定位
+async function geocodeAll(names) {
+  const raw = [];
+  for (let i = 0; i < names.length; i++) {
+    setStatus(0, `定位 ${i + 1}/${names.length}：${names[i]}`);
+    raw.push(await geocodeOne(names[i], null));
+    if (!googleReady) await sleep(1100);
+  }
+  const valid = raw.filter(Boolean);
+  let anchor = null, best = -1;
+  for (const a of valid) {
+    let c = 0;
+    for (const b of valid) if (haversine(a, b) < 40) c++;
+    if (c > best) { best = c; anchor = a; }
+  }
+  const out = [];
+  for (let i = 0; i < names.length; i++) {
+    let g = raw[i];
+    if (anchor && (!g || haversine(g, anchor) > 50)) {
+      setStatus(0, `區域校正 ${i + 1}/${names.length}：${names[i]}`);
+      const g2 = await geocodeOne(names[i], anchor);
+      if (!googleReady) await sleep(1100);
+      if (g2) g = g2;
+    }
+    out.push({ name: names[i], g });
+  }
+  return out;
 }
 
 /* ---------- 4. 高程（Open-Meteo，永不丟例外） ---------- */
@@ -279,26 +319,122 @@ function analyzeProfile(coords) {
   return { totalAscent, totalDescent, maxUp, maxGrade, bins };
 }
 
-/* ---------- 6. 維基百科介紹 ---------- */
-async function getWiki(name) {
+/* ---------- 6. 維基百科介紹（座標就近搜尋＋消歧義過濾，只留與該地點相關的內容） ---------- */
+
+// 名稱正規化：統一臺/台、去空白標點，方便比對
+function normName(s) {
+  return String(s || '')
+    .toLowerCase()
+    .replace(/臺/g, '台')
+    .replace(/[\s·・，,。.\-—()（）「」『』]/g, '');
+}
+
+// 清理維基序言文字：移除章節標題、參考標記，收斂空白，過長時截到句尾
+function cleanWikiText(raw) {
+  if (!raw) return '';
+  let t = String(raw)
+    .replace(/^\s*={2,}.*?={2,}\s*$/gm, '')   // 移除「== 章節標題 ==」整行
+    .replace(/\[\d+\]/g, '')                   // 移除參考標記 [1]
+    .replace(/&nbsp;/g, ' ')
+    .replace(/[ \t]+/g, ' ')
+    .replace(/\n{2,}/g, '\n')
+    .trim();
+  if (t.length > 560) {                        // 過長 → 截到最後一個句末標點
+    const cut = t.slice(0, 560);
+    const m = cut.lastIndexOf('。');
+    t = (m > 200 ? cut.slice(0, m + 1) : cut).trim();
+  }
+  return t;
+}
+
+// 序言看起來像「消歧義／簡稱列表」就不採用
+function looksAmbiguous(extract) {
+  return /可以指|可能指|通常指|是下列|的(簡稱|縮寫|別稱)|消歧義/
+    .test((extract || '').slice(0, 70));
+}
+
+// 維基百科地點介紹：以座標就近比對為主，過濾掉與該地點無關的內容
+async function getWiki(name, lat, lon) {
   try {
-    const s = await (await fetch(
-      `https://zh.wikipedia.org/w/api.php?action=query&list=search&srsearch=${encodeURIComponent(name)}` +
-      `&srlimit=1&format=json&origin=*`)).json();
-    const hit = s.query && s.query.search[0];
-    if (!hit) return null;
-    const e = await (await fetch(
-      `https://zh.wikipedia.org/w/api.php?action=query&prop=extracts&explaintext=1&exchars=1900` +
-      `&redirects=1&format=json&origin=*&titles=${encodeURIComponent(hit.title)}`)).json();
-    const pages = e.query.pages;
-    const page = pages[Object.keys(pages)[0]];
-    if (!page || !page.extract) return null;
+    const API = 'https://zh.wikipedia.org/w/api.php';
+    const titleSet = new Set();
+
+    // (1) 座標就近搜尋：找出該座標 10 公里內、真實存在的地理條目。
+    //     消歧義頁、小說、雜誌等沒有座標，不會出現在這裡 → 從源頭避開誤植。
+    // (2) 名稱搜尋作為補充。
+    const [geoRes, searchRes] = await Promise.all([
+      fetch(`${API}?action=query&list=geosearch&gscoord=${lat}|${lon}` +
+        `&gsradius=10000&gslimit=20&format=json&origin=*`)
+        .then(r => r.json()).catch(() => null),
+      fetch(`${API}?action=query&list=search&srsearch=${encodeURIComponent(name)}` +
+        `&srlimit=5&format=json&origin=*`)
+        .then(r => r.json()).catch(() => null)
+    ]);
+    if (geoRes && geoRes.query && geoRes.query.geosearch)
+      for (const it of geoRes.query.geosearch) titleSet.add(it.title);
+    if (searchRes && searchRes.query && searchRes.query.search)
+      for (const h of searchRes.query.search) titleSet.add(h.title);
+    if (!titleSet.size) return null;
+
+    // 取得各候選條目的：序言（僅序言段）、座標、是否為消歧義頁
+    const titles = [...titleSet].slice(0, 20).join('|');
+    const e = await (await fetch(`${API}?action=query` +
+      `&prop=extracts|coordinates|pageprops&ppprop=disambiguation` +
+      `&exintro=1&explaintext=1&exchars=1400&exlimit=20` +
+      `&redirects=1&format=json&origin=*&titles=${encodeURIComponent(titles)}`)).json();
+    const pages = (e.query && e.query.pages) || {};
+
+    const target = normName(name);
+    let best = null, bestScore = -Infinity;
+
+    for (const k of Object.keys(pages)) {
+      const p = pages[k];
+      if (p.missing !== undefined) continue;
+      // 排除消歧義頁
+      if (p.pageprops && p.pageprops.disambiguation !== undefined) continue;
+      const extract = cleanWikiText(p.extract);
+      if (!extract || extract.length < 12) continue;
+      if (looksAmbiguous(extract)) continue;
+
+      // 名稱相符程度
+      const t = normName(p.title);
+      let nameScore = 0;
+      if (t === target) nameScore = 3;
+      else if (t.includes(target) || target.includes(t)) nameScore = 2;
+
+      // 座標距離（公里）
+      let d = Infinity;
+      if (p.coordinates && p.coordinates[0])
+        d = haversine({ lat, lon },
+          { lat: p.coordinates[0].lat, lon: p.coordinates[0].lon });
+
+      // 採用規則：寧可沒有，也不放不相關的內容
+      let score;
+      if (d <= 1.5) {
+        score = 1000 - d * 10 + nameScore * 8;       // 就在原地 → 幾乎一定是它
+      } else if (d <= 30 && nameScore >= 2) {
+        score = 600 - d * 8 + nameScore * 20;        // 附近且名稱相符
+      } else if (d === Infinity && nameScore === 3) {
+        score = 300;                                  // 無座標但名稱完全相同
+      } else {
+        continue;                                     // 其餘一律不採用
+      }
+      if (score > bestScore) { bestScore = score; best = { p, extract }; }
+    }
+    if (!best) return null;
     return {
-      title: page.title,
-      extract: page.extract.replace(/\n{2,}/g, '\n').trim(),
-      url: 'https://zh.wikipedia.org/wiki/' + encodeURIComponent(page.title)
+      title: best.p.title,
+      extract: best.extract,
+      url: 'https://zh.wikipedia.org/wiki/' + encodeURIComponent(best.p.title)
     };
   } catch { return null; }
+}
+
+// 地點介紹：以維基百科為來源（座標就近比對，過濾不相關內容）
+async function getPlaceInfo(name, lat, lon) {
+  const w = await getWiki(name, lat, lon);
+  if (w) return { ...w, source: 'wiki' };
+  return null;
 }
 
 /* ---------- 7. 語音導覽 ---------- */
@@ -385,24 +521,33 @@ async function runPlan() {
     const key = $('#gkey').value.trim();
     if (key) { try { await loadGoogle(key); } catch (e) { alert(e.message + '，將改用免費服務。'); } }
 
-    // 定位
+    // 定位（兩階段嚴謹定位）
+    const located = await geocodeAll(names);
+    // 套用 20 公里規則：與前一個保留點直線距離 > 20km 即整個略過
     const places = [];
-    const failed = [];
-    for (let i = 0; i < names.length; i++) {
-      setStatus(0, `${i + 1}/${names.length} ${names[i]}`);
-      const g = await geocode(names[i]);
-      if (!googleReady && i < names.length - 1) await sleep(1100);
-      if (g) places.push({ name: names[i], lat: g.lat, lon: g.lon });
-      else failed.push(names[i]);
+    const skipped = [];
+    for (const it of located) {
+      if (!it.g) { skipped.push(`${it.name}（查無座標）`); continue; }
+      if (places.length === 0) {
+        places.push({ name: it.name, lat: it.g.lat, lon: it.g.lon });
+      } else {
+        const last = places[places.length - 1];
+        const dist = haversine(last, it.g);
+        if (dist > 20) {
+          skipped.push(`${it.name}（距前一點約 ${dist.toFixed(0)} km，超過 20 km）`);
+        } else {
+          places.push({ name: it.name, lat: it.g.lat, lon: it.g.lon });
+        }
+      }
     }
     if (places.length < 2)
-      throw new Error('可成功定位的地點不足 2 個。查不到的：' + (failed.join('、') || '無') +
-        '。請回上一步把地名寫得更完整或正確。');
+      throw new Error('可用地點不足 2 個。被略過：' + (skipped.join('；') || '無') +
+        '。請回上一步把地名寫得更明確，例如加上縣市（「萬里」→「新北市萬里區」）。');
 
-    // 介紹
+    // 地點介紹（維基百科，座標就近比對）
     for (let i = 0; i < places.length; i++) {
       setStatus(1, `${i + 1}/${places.length} ${places[i].name}`);
-      places[i].wiki = await getWiki(places[i].name);
+      places[i].info = await getPlaceInfo(places[i].name, places[i].lat, places[i].lon);
     }
 
     // 道路路線 + 坡度（每段獨立容錯）
@@ -440,7 +585,7 @@ async function runPlan() {
     }
 
     setStatus(3);
-    render({ date: pendingDate, places, segments, totalDist, totalAscent, maxGradeAll, failed });
+    render({ date: pendingDate, places, segments, totalDist, totalAscent, maxGradeAll, skipped });
     $('#status').hidden = true;
   } catch (e) {
     $('#status').hidden = false;
@@ -506,18 +651,19 @@ function renderSummary(d) {
   let note = '※ 距離與坡度依實際道路路線計算' +
     (googleReady ? '（Google 單車路線）' : '（BRouter／OSRM 道路路網）') +
     '；無法規劃路線的路段以直線推估並標註。坡度以每 80 公尺區段平均。';
-  if (d.failed && d.failed.length)
-    note += ' 未能定位而略過：' + d.failed.join('、') + '。';
+  if (d.skipped && d.skipped.length)
+    note += ' ｜ 已略過：' + d.skipped.join('；') + '。';
   $('#approxNote').textContent = note;
 }
 
 function renderPlaces(places) {
   $('#places').innerHTML = places.map((p, i) => {
-    const desc = p.wiki ? p.wiki.extract
-      : '（維基百科查無此地點條目。可自行補充自然、人文、歷史、地形、美食與工藝等介紹。）';
-    const src = p.wiki
-      ? `資料來源：<a href="${p.wiki.url}" target="_blank" rel="noopener">維基百科 · ${p.wiki.title}</a>`
-      : '';
+    const info = p.info;
+    const desc = info ? info.extract
+      : '（維基百科查無此地點的對應條目，可自行補充自然、人文、歷史、地形、美食與工藝等說明。）';
+    let src = '';
+    if (info && info.source === 'wiki')
+      src = `資料來源：<a href="${info.url}" target="_blank" rel="noopener">維基百科 · ${info.title}</a>`;
     return `<div class="place">
       <div class="place-head">
         <span class="idx">${i + 1}</span><span class="place-name">${p.name}</span>
@@ -537,7 +683,7 @@ function renderPlaces(places) {
   $('#places').querySelectorAll('[data-tts]').forEach(btn => {
     btn.onclick = () => {
       const p = places[+btn.dataset.tts];
-      TTS.speak(`${p.name}。${p.wiki ? p.wiki.extract : '此地點暫無詳細介紹。'}`);
+      TTS.speak(`${p.name}。${p.info ? p.info.extract : '此地點暫無詳細介紹。'}`);
     };
   });
   $('#places').querySelectorAll('[data-pause]').forEach(b => b.onclick = () => TTS.pause());

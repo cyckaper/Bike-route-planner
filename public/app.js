@@ -114,18 +114,7 @@ function extractLocations(text) {
   return names.filter(n => !names.some(m => m !== n && m.includes(n)));
 }
 
-/* ---------- 3. 定位（Nominatim / Google） ---------- */
-let googleReady = false;
-function loadGoogle(key) {
-  return new Promise((res, rej) => {
-    if (window.google && window.google.maps) { googleReady = true; return res(); }
-    const s = document.createElement('script');
-    s.src = `https://maps.googleapis.com/maps/api/js?key=${encodeURIComponent(key)}`;
-    s.onload = () => { googleReady = true; res(); };
-    s.onerror = () => rej(new Error('Google Maps 金鑰載入失敗'));
-    document.head.appendChild(s);
-  });
-}
+/* ---------- 3. 定位（OpenStreetMap Nominatim） ---------- */
 async function nominatimSearch(name, viewbox) {
   let url = `https://nominatim.openstreetmap.org/search?q=${encodeURIComponent(name + ' 台灣')}` +
     `&format=json&limit=1&accept-language=zh-TW&countrycodes=tw`;
@@ -136,28 +125,9 @@ async function nominatimSearch(name, viewbox) {
     return { lat: +j[0].lat, lon: +j[0].lon };
   } catch { return null; }
 }
-function googleSearch(name, bounds) {
-  return new Promise(res => {
-    const req = { address: name, region: 'tw', componentRestrictions: { country: 'TW' } };
-    if (bounds) req.bounds = bounds;
-    new google.maps.Geocoder().geocode(req, (r, st) => {
-      if (st === 'OK' && r[0]) {
-        const l = r[0].geometry.location;
-        res({ lat: l.lat(), lon: l.lng() });
-      } else res(null);
-    });
-  });
-}
 // 單點定位，可帶中心點做區域偏好／限制
 async function geocodeOne(name, center) {
   const d = 0.5; // 約 55 公里範圍框
-  if (googleReady) {
-    let b = null;
-    if (center) b = new google.maps.LatLngBounds(
-      { lat: center.lat - d, lng: center.lon - d },
-      { lat: center.lat + d, lng: center.lon + d });
-    try { return await googleSearch(name, b); } catch { return null; }
-  }
   const vb = center
     ? `${center.lon - d},${center.lat + d},${center.lon + d},${center.lat - d}` : null;
   return await nominatimSearch(name, vb);
@@ -168,7 +138,7 @@ async function geocodeAll(names) {
   for (let i = 0; i < names.length; i++) {
     setStatus(0, `定位 ${i + 1}/${names.length}：${names[i]}`);
     raw.push(await geocodeOne(names[i], null));
-    if (!googleReady) await sleep(1100);
+    await sleep(1100);
   }
   const valid = raw.filter(Boolean);
   let anchor = null, best = -1;
@@ -183,140 +153,12 @@ async function geocodeAll(names) {
     if (anchor && (!g || haversine(g, anchor) > 50)) {
       setStatus(0, `區域校正 ${i + 1}/${names.length}：${names[i]}`);
       const g2 = await geocodeOne(names[i], anchor);
-      if (!googleReady) await sleep(1100);
+      await sleep(1100);
       if (g2) g = g2;
     }
     out.push({ name: names[i], g });
   }
   return out;
-}
-
-/* ---------- 4. 高程（Open-Meteo，永不丟例外） ---------- */
-async function elevationOpenMeteo(points) {
-  const out = [];
-  for (let i = 0; i < points.length; i += 90) {
-    const chunk = points.slice(i, i + 90);
-    try {
-      const url = `https://api.open-meteo.com/v1/elevation?latitude=` +
-        `${chunk.map(p => p.lat.toFixed(5)).join(',')}` +
-        `&longitude=${chunk.map(p => p.lon.toFixed(5)).join(',')}`;
-      const j = await (await fetch(url)).json();
-      const e = j && j.elevation;
-      out.push(...(Array.isArray(e) ? e : chunk.map(() => 0)));
-    } catch { out.push(...chunk.map(() => 0)); }
-  }
-  return out.map(v => (typeof v === 'number' ? v : 0));
-}
-
-/* ---------- 5. 道路路線規劃（多重後備，永不崩潰） ---------- */
-async function routeBrouter(a, b, profile) {
-  const url = `https://brouter.de/brouter?lonlats=${a.lon},${a.lat}|${b.lon},${b.lat}` +
-    `&profile=${profile}&alternativeidx=0&format=geojson`;
-  const r = await fetch(url);
-  if (!r.ok) throw new Error('brouter ' + r.status);
-  const j = await r.json();
-  const f = j.features && j.features[0];
-  if (!f || !f.geometry || !f.geometry.coordinates.length) throw new Error('no route');
-  const coords = f.geometry.coordinates.map(c => ({
-    lat: c[1], lon: c[0], ele: (c[2] != null ? +c[2] : null)
-  }));
-  const p = f.properties || {};
-  return {
-    coords, source: 'brouter',
-    dist: (p['track-length'] ? +p['track-length'] : 0) / 1000,
-    ascend: p['filtered ascend'] != null ? +p['filtered ascend'] : null
-  };
-}
-async function routeOSRM(a, b) {
-  const url = `https://router.project-osrm.org/route/v1/driving/` +
-    `${a.lon},${a.lat};${b.lon},${b.lat}?overview=full&geometries=geojson`;
-  const r = await fetch(url);
-  if (!r.ok) throw new Error('osrm ' + r.status);
-  const j = await r.json();
-  if (j.code !== 'Ok' || !j.routes || !j.routes[0]) throw new Error('osrm no route');
-  let coords = j.routes[0].geometry.coordinates.map(c => ({ lat: c[1], lon: c[0], ele: null }));
-  if (coords.length > 80) {
-    const step = coords.length / 80, ds = [];
-    for (let k = 0; k < 80; k++) ds.push(coords[Math.floor(k * step)]);
-    ds.push(coords[coords.length - 1]);
-    coords = ds;
-  }
-  return { coords, source: 'osrm', dist: j.routes[0].distance / 1000, ascend: null };
-}
-function googleBike(a, b) {
-  return new Promise((res, rej) => {
-    new google.maps.DirectionsService().route({
-      origin: { lat: a.lat, lng: a.lon }, destination: { lat: b.lat, lng: b.lon },
-      travelMode: google.maps.TravelMode.BICYCLING
-    }, (r, st) => {
-      if (st !== 'OK' || !r.routes[0]) return rej(new Error('google ' + st));
-      let dist = 0;
-      r.routes[0].legs.forEach(l => dist += l.distance.value);
-      res({ path: r.routes[0].overview_path, dist: dist / 1000 });
-    });
-  });
-}
-async function routeGoogle(a, b) {
-  const { path, dist } = await googleBike(a, b);
-  const eles = await new Promise(res => {
-    new google.maps.ElevationService().getElevationAlongPath(
-      { path, samples: Math.min(250, Math.max(20, path.length)) },
-      (r, st) => res(st === 'OK' ? r : null));
-  });
-  const coords = eles
-    ? eles.map(e => ({ lat: e.location.lat(), lon: e.location.lng(), ele: e.elevation }))
-    : path.map(p => ({ lat: p.lat(), lon: p.lng(), ele: null }));
-  return { coords, source: 'google', dist, ascend: null };
-}
-async function routeStraight(a, b) {
-  const dist = haversine(a, b);
-  const n = Math.min(48, Math.max(10, Math.round(dist * 4)));
-  const pts = interpolate(a, b, n);
-  const eles = await elevationOpenMeteo(pts);
-  return {
-    coords: pts.map((p, i) => ({ ...p, ele: eles[i] != null ? eles[i] : null })),
-    source: 'straight', dist, ascend: null
-  };
-}
-// 統一入口：Google → BRouter → OSRM → 直線；任何例外都不外溢
-async function routeSegment(a, b, profile) {
-  if (googleReady) { try { return await routeGoogle(a, b); } catch (e) {} }
-  try { return await routeBrouter(a, b, profile); } catch (e) {}
-  try { return await routeOSRM(a, b); } catch (e) {}
-  try { return await routeStraight(a, b); } catch (e) {}
-  // 最終保底：純直線、無高程
-  return {
-    coords: [{ lat: a.lat, lon: a.lon, ele: 0 }, { lat: b.lat, lon: b.lon, ele: 0 }],
-    source: 'straight', dist: haversine(a, b), ascend: null
-  };
-}
-async function ensureElevation(coords) {
-  const missing = coords.filter(c => c.ele == null);
-  if (!missing.length) return coords;
-  const eles = await elevationOpenMeteo(missing);
-  let k = 0;
-  for (const c of coords) if (c.ele == null) { const v = eles[k++]; c.ele = (v != null ? v : 0); }
-  return coords;
-}
-// 坡度：以 ≥80m 區段為單位，抑制高程雜訊
-function analyzeProfile(coords) {
-  let totalAscent = 0, totalDescent = 0, maxUp = 0, maxGrade = 0;
-  const bins = [];
-  let accDist = 0, accRise = 0;
-  for (let i = 1; i < coords.length; i++) {
-    const d = haversine(coords[i - 1], coords[i]) * 1000;
-    const de = (coords[i].ele || 0) - (coords[i - 1].ele || 0);
-    if (de > 0) totalAscent += de; else totalDescent += -de;
-    accDist += d; accRise += de;
-    if (accDist >= 80 || i === coords.length - 1) {
-      const grade = accDist > 1 ? accRise / accDist * 100 : 0;
-      bins.push({ ele: coords[i].ele || 0, grade });
-      if (grade > maxUp) maxUp = grade;
-      if (Math.abs(grade) > maxGrade) maxGrade = Math.abs(grade);
-      accDist = 0; accRise = 0;
-    }
-  }
-  return { totalAscent, totalDescent, maxUp, maxGrade, bins };
 }
 
 /* ---------- 6. 維基百科介紹（座標就近搜尋＋消歧義過濾，只留與該地點相關的內容） ---------- */
@@ -461,30 +303,8 @@ const TTS = {
   stop() { speechSynthesis.cancel(); }
 };
 
-/* ---------- 8. 難度比較 ---------- */
-const REF_ROUTES = [
-  { name: '淡水河左岸（關渡—淡水）', dist: 12, ascent: 30, grade: 2 },
-  { name: '八里左岸自行車道', dist: 14, ascent: 25, grade: 2 },
-  { name: '后豐鐵馬道', dist: 12, ascent: 40, grade: 3 },
-  { name: '東豐自行車綠廊', dist: 13, ascent: 60, grade: 3 },
-  { name: '新店溪—碧潭自行車道', dist: 16, ascent: 55, grade: 3 },
-  { name: '日月潭環潭自行車道', dist: 30, ascent: 480, grade: 8 },
-  { name: '北海岸（淡水—金山）', dist: 38, ascent: 520, grade: 9 },
-  { name: '風櫃嘴（外雙溪上行）', dist: 11, ascent: 560, grade: 12 },
-  { name: '陽明山巴拉卡公路', dist: 18, ascent: 760, grade: 13 },
-  { name: '武嶺（埔里端上行）', dist: 55, ascent: 3275, grade: 14 }
-];
-const score = r => r.dist * 0.6 + r.ascent * 0.05 + r.grade * 2.5;
-function difficultyBand(s) {
-  if (s < 18) return { label: '輕鬆休閒級', cls: 'b-easy' };
-  if (s < 35) return { label: '入門級', cls: 'b-easy' };
-  if (s < 60) return { label: '中等強度', cls: 'b-mid' };
-  if (s < 100) return { label: '進階級', cls: 'b-hard' };
-  return { label: '挑戰級', cls: 'b-extreme' };
-}
-
 /* ---------- 9. 狀態列 ---------- */
-const STEPS = ['地點定位', '查詢介紹', '規劃道路與坡度', '完成'];
+const STEPS = ['地點定位', '查詢介紹', '完成'];
 function setStatus(stepIdx, msg) {
   const box = $('#status');
   box.hidden = false;
@@ -511,16 +331,13 @@ function detectLocations() {
 /* ---------- 11. 第二步：規劃 ---------- */
 async function runPlan() {
   const names = $('#locList').value.split('\n').map(s => s.trim()).filter(Boolean);
-  if (names.length < 2) { alert('請至少輸入 2 個地點（一行一個）。'); return; }
+  if (names.length < 1) { alert('請至少輸入 1 個地點（一行一個）。'); return; }
   $('#confirmBtn').disabled = true;
   $('#detectBtn').disabled = true;
   $('#results').hidden = true;
   TTS.stop();
 
   try {
-    const key = $('#gkey').value.trim();
-    if (key) { try { await loadGoogle(key); } catch (e) { alert(e.message + '，將改用免費服務。'); } }
-
     // 定位（兩階段嚴謹定位）
     const located = await geocodeAll(names);
     // 套用 20 公里規則：與前一個保留點直線距離 > 20km 即整個略過
@@ -540,8 +357,8 @@ async function runPlan() {
         }
       }
     }
-    if (places.length < 2)
-      throw new Error('可用地點不足 2 個。被略過：' + (skipped.join('；') || '無') +
+    if (!places.length)
+      throw new Error('查無任何可用地點。被略過：' + (skipped.join('；') || '無') +
         '。請回上一步把地名寫得更明確，例如加上縣市（「萬里」→「新北市萬里區」）。');
 
     // 地點介紹（維基百科，座標就近比對）
@@ -550,42 +367,8 @@ async function runPlan() {
       places[i].info = await getPlaceInfo(places[i].name, places[i].lat, places[i].lon);
     }
 
-    // 道路路線 + 坡度（每段獨立容錯）
-    const profile = $('#profile').value;
-    const segments = [];
-    let totalDist = 0, totalAscent = 0, maxGradeAll = 0;
-    for (let i = 0; i < places.length - 1; i++) {
-      const a = places[i], b = places[i + 1];
-      setStatus(2, `${i + 1}/${places.length - 1} ${a.name} → ${b.name}`);
-      let route, prof;
-      try {
-        route = await routeSegment(a, b, profile);
-        await ensureElevation(route.coords);
-        prof = analyzeProfile(route.coords);
-      } catch (e) {
-        route = {
-          coords: [{ lat: a.lat, lon: a.lon, ele: 0 }, { lat: b.lat, lon: b.lon, ele: 0 }],
-          source: 'straight', dist: haversine(a, b), ascend: null
-        };
-        prof = { totalAscent: 0, totalDescent: 0, maxUp: 0, maxGrade: 0, bins: [] };
-      }
-      const seg = {
-        from: a.name, to: b.name,
-        coords: route.coords, dist: route.dist, source: route.source,
-        ascent: route.ascend != null ? route.ascend : prof.totalAscent,
-        descent: prof.totalDescent, maxUp: prof.maxUp, maxGrade: prof.maxGrade,
-        bins: prof.bins.length ? prof.bins : [{ ele: 0, grade: 0 }],
-        steep: prof.maxGrade > 8, tooFar: route.dist > 20
-      };
-      segments.push(seg);
-      if (!seg.tooFar) {
-        totalDist += seg.dist; totalAscent += seg.ascent;
-        if (seg.maxGrade > maxGradeAll) maxGradeAll = seg.maxGrade;
-      }
-    }
-
-    setStatus(3);
-    render({ date: pendingDate, places, segments, totalDist, totalAscent, maxGradeAll, skipped });
+    setStatus(2);
+    render({ places, skipped });
     $('#status').hidden = true;
   } catch (e) {
     $('#status').hidden = false;
@@ -597,63 +380,17 @@ async function runPlan() {
 }
 
 /* ---------- 12. 渲染 ---------- */
-let mapObj = null;
 function render(d) {
   $('#results').hidden = false;
-  const safe = (fn) => { try { fn(); } catch (e) { console.error(e); } };
-  safe(() => renderMap(d.places, d.segments));
-  safe(() => renderSummary(d));
-  safe(() => renderPlaces(d.places));
-  safe(() => renderSegments(d.segments));
-  safe(() => renderDifficulty(d));
+  try { renderPlaces(d.places); } catch (e) { console.error(e); }
+  if (d.skipped && d.skipped.length) {
+    const note = document.createElement('div');
+    note.className = 'note tiny';
+    note.style.margin = '0 0 14px';
+    note.textContent = '已略過：' + d.skipped.join('；') + '。';
+    $('#places').prepend(note);
+  }
   $('#results').scrollIntoView({ behavior: 'smooth' });
-}
-
-function renderMap(places, segments) {
-  if (mapObj) mapObj.remove();
-  mapObj = L.map('map');
-  L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
-    maxZoom: 19, attribution: '© OpenStreetMap'
-  }).addTo(mapObj);
-  const bounds = [];
-  segments.forEach(s => {
-    const line = s.coords.map(c => [c.lat, c.lon]);
-    bounds.push(...line);
-    L.polyline(line, {
-      color: s.tooFar ? '#b04a4a' : s.steep ? '#bc5a3c' : '#3d5236',
-      weight: 4, dashArray: s.source === 'straight' ? '8,8' : null, opacity: .85
-    }).addTo(mapObj);
-  });
-  places.forEach((p, i) => {
-    bounds.push([p.lat, p.lon]);
-    L.marker([p.lat, p.lon], {
-      icon: L.divIcon({
-        className: '', html: `<div class="map-marker"><span>${i + 1}</span></div>`,
-        iconSize: [26, 26], iconAnchor: [13, 26]
-      })
-    }).addTo(mapObj).bindPopup(`<b>${i + 1}. ${p.name}</b>`);
-  });
-  if (bounds.length) mapObj.fitBounds(bounds, { padding: [30, 30] });
-}
-
-function renderSummary(d) {
-  const band = difficultyBand(score({ dist: d.totalDist, ascent: d.totalAscent, grade: d.maxGradeAll }));
-  const dateStr = d.date
-    ? d.date.toLocaleDateString('zh-TW', { year: 'numeric', month: 'long', day: 'numeric' })
-    : '未指定';
-  $('#summary').innerHTML = `
-    <div class="stat"><div class="k">出發日期</div><div class="v" style="font-size:16px">${dateStr}</div></div>
-    <div class="stat"><div class="k">地點數</div><div class="v">${d.places.length}<span class="u"> 站</span></div></div>
-    <div class="stat"><div class="k">路線總距離</div><div class="v">${d.totalDist.toFixed(1)}<span class="u"> km</span></div></div>
-    <div class="stat"><div class="k">累積爬升</div><div class="v">${Math.round(d.totalAscent)}<span class="u"> m</span></div></div>
-    <div class="stat"><div class="k">最陡坡度</div><div class="v">${d.maxGradeAll.toFixed(1)}<span class="u"> %</span></div></div>
-    <div class="stat"><div class="k">難度等級</div><div style="margin-top:6px"><span class="badge ${band.cls}">${band.label}</span></div></div>`;
-  let note = '※ 距離與坡度依實際道路路線計算' +
-    (googleReady ? '（Google 單車路線）' : '（BRouter／OSRM 道路路網）') +
-    '；無法規劃路線的路段以直線推估並標註。坡度以每 80 公尺區段平均。';
-  if (d.skipped && d.skipped.length)
-    note += ' ｜ 已略過：' + d.skipped.join('；') + '。';
-  $('#approxNote').textContent = note;
 }
 
 function renderPlaces(places) {
@@ -689,76 +426,6 @@ function renderPlaces(places) {
   $('#places').querySelectorAll('[data-pause]').forEach(b => b.onclick = () => TTS.pause());
   $('#places').querySelectorAll('[data-resume]').forEach(b => b.onclick = () => TTS.resume());
   $('#places').querySelectorAll('[data-stop]').forEach(b => b.onclick = () => TTS.stop());
-}
-
-function renderSegments(segments) {
-  $('#segments').innerHTML = segments.map((s, i) => {
-    const cls = s.tooFar ? 'toofar' : s.steep ? 'steep' : '';
-    let bins = s.bins;
-    if (bins.length > 60) {
-      const step = bins.length / 60, out = [];
-      for (let k = 0; k < 60; k++) out.push(bins[Math.floor(k * step)]);
-      bins = out;
-    }
-    const eles = bins.map(b => b.ele);
-    const maxE = Math.max(...eles), minE = Math.min(...eles), range = Math.max(1, maxE - minE);
-    const profile = bins.map(b => {
-      const h = 6 + (b.ele - minE) / range * 40;
-      const g = Math.abs(b.grade);
-      const cl = g > 8 ? 'hot' : g > 4 ? 'up' : '';
-      return `<span class="${cl}" style="height:${h}px" title="${Math.round(b.ele)} m / ${b.grade.toFixed(1)}%"></span>`;
-    }).join('');
-    const srcLabel = s.source === 'brouter' ? '實際道路（BRouter 單車路網）'
-      : s.source === 'google' ? '實際道路（Google 單車路線）'
-      : s.source === 'osrm' ? '實際道路（OSRM 道路路網）'
-      : '直線推估（此段無法規劃道路路線）';
-    let warn = '';
-    if (s.tooFar)
-      warn = `<div class="seg-warn far">⚠ 道路距離超過 20 公里，路段不合理，已自動排除於行程總計之外。建議拆分或重新安排。</div>`;
-    else if (s.steep)
-      warn = `<div class="seg-warn">⚠ 此路段有超過 8% 的陡坡，最陡達 ${s.maxGrade.toFixed(1)}%（上坡最陡 ${s.maxUp.toFixed(1)}%），小摺請預留體力或考慮牽行。</div>`;
-    return `<div class="seg ${cls}">
-      <div class="seg-title">${i + 1}　${s.from} → ${s.to}</div>
-      <div class="seg-stats">
-        <span>道路距離 <b>${s.dist.toFixed(2)}</b> km</span>
-        <span>爬升 <b>${Math.round(s.ascent)}</b> m</span>
-        <span>下降 <b>${Math.round(s.descent)}</b> m</span>
-        <span>最陡坡度 <b>${s.maxGrade.toFixed(1)}</b> %</span>
-      </div>
-      <div class="profile">${profile}</div>
-      <div class="desc-src">里程來源：${srcLabel}</div>
-      ${warn}
-    </div>`;
-  }).join('');
-}
-
-function renderDifficulty(d) {
-  const meRoute = { dist: d.totalDist, ascent: d.totalAscent, grade: d.maxGradeAll };
-  const meScore = score(meRoute);
-  const all = [
-    ...REF_ROUTES.map(r => ({ name: r.name, s: score(r), me: false })),
-    { name: '★ 你的路線', s: meScore, me: true }
-  ].sort((a, b) => b.s - a.s);
-  const max = all[0].s || 1;
-  const bars = all.map(r => `
-    <div class="diff-bar ${r.me ? 'me' : ''}">
-      <span class="dn">${r.name}</span>
-      <span class="diff-track"><span class="diff-fill" style="width:${(r.s / max * 100).toFixed(0)}%"></span></span>
-      <span class="diff-score">${r.s.toFixed(0)}</span>
-    </div>`).join('');
-  const refs = REF_ROUTES.map(r => ({ name: r.name, s: score(r), gap: Math.abs(score(r) - meScore) }))
-    .sort((a, b) => a.gap - b.gap);
-  const band = difficultyBand(meScore);
-  const verdict = `<div class="diff-verdict">
-    你的路線難度分數約 <b>${meScore.toFixed(0)}</b>，等級為「<b>${band.label}</b>」。
-    強度最接近的大眾單車路線是 <b>${refs[0].name}</b>（${refs[0].s.toFixed(0)} 分），
-    其次為 <b>${refs[1].name}</b>。
-    ${meScore < 35 ? '整體屬輕鬆愜意的河濱級行程，適合 Brompton 悠騎與走走停停。'
-      : meScore < 60 ? '屬中等強度，沿途有起伏，建議分段休息、補水。'
-      : '強度偏高，請評估體能、預留時間，必要時於陡坡牽行。'}
-    <br><span class="tiny">難度分數 = 距離×0.6 ＋ 累積爬升×0.05 ＋ 最陡坡度×2.5（僅供相對比較）。</span>
-  </div>`;
-  $('#difficulty').innerHTML = bars + verdict;
 }
 
 /* ---------- 13. 事件綁定 ---------- */

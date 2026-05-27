@@ -16,8 +16,9 @@ let tokenCache = { token: null, expiry: 0 };
 async function getToken() {
   const now = Date.now();
   if (tokenCache.token && now < tokenCache.expiry) return tokenCache.token;
-  const id = process.env.TDX_CLIENT_ID;
-  const secret = process.env.TDX_CLIENT_SECRET;
+  // 自動清除值前後可能夾帶的空白／換行（常見的貼上錯誤）
+  const id = (process.env.TDX_CLIENT_ID || '').trim();
+  const secret = (process.env.TDX_CLIENT_SECRET || '').trim();
   if (!id || !secret) throw new Error('NO_KEY');
   const res = await fetch(AUTH_URL, {
     method: 'POST',
@@ -26,7 +27,11 @@ async function getToken() {
       '&client_id=' + encodeURIComponent(id) +
       '&client_secret=' + encodeURIComponent(secret)
   });
-  if (!res.ok) throw new Error('AUTH_FAIL_' + res.status);
+  if (!res.ok) {
+    let detail = '';
+    try { detail = ((await res.text()) || '').slice(0, 300); } catch (e) {}
+    throw new Error('AUTH_FAIL_' + res.status + (detail ? ': ' + detail : ''));
+  }
   const j = await res.json();
   tokenCache.token = j.access_token;
   // 提前 10 分鐘視為失效，預留緩衝
@@ -54,9 +59,30 @@ function clean(text) {
 exports.handler = async (event) => {
   const headers = {
     'content-type': 'application/json; charset=utf-8',
-    'cache-control': 'public, max-age=86400'
+    'cache-control': 'no-store'
   };
   const q = (event && event.queryStringParameters) || {};
+
+  // 診斷模式：?debug=1，安全回報金鑰狀態（不外洩 Secret 內容）
+  if (q.debug === '1') {
+    const id = process.env.TDX_CLIENT_ID || '';
+    const sec = process.env.TDX_CLIENT_SECRET || '';
+    return {
+      statusCode: 200, headers,
+      body: JSON.stringify({
+        debug: true,
+        idPresent: !!id,
+        idLength: id.length,
+        idWhitespace: id.length - id.trim().length,
+        idHead: id.trim().slice(0, 7),
+        idTail: id.trim().slice(-4),
+        secretPresent: !!sec,
+        secretLength: sec.length,
+        secretWhitespace: sec.length - sec.trim().length
+      })
+    };
+  }
+
   const lat = parseFloat(q.lat), lon = parseFloat(q.lon);
   const name = (q.name || '').trim();
   if (!isFinite(lat) || !isFinite(lon))

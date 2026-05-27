@@ -63,24 +63,44 @@ exports.handler = async (event) => {
   };
   const q = (event && event.queryStringParameters) || {};
 
-  // 診斷模式：?debug=1，安全回報金鑰狀態（不外洩 Secret 內容）
+  // 診斷模式：?debug=1，回報金鑰狀態並實際對 TDX 登入一次，回傳原始結果
   if (q.debug === '1') {
     const id = process.env.TDX_CLIENT_ID || '';
     const sec = process.env.TDX_CLIENT_SECRET || '';
-    return {
-      statusCode: 200, headers,
-      body: JSON.stringify({
-        debug: true,
-        idPresent: !!id,
-        idLength: id.length,
-        idWhitespace: id.length - id.trim().length,
-        idHead: id.trim().slice(0, 7),
-        idTail: id.trim().slice(-4),
-        secretPresent: !!sec,
-        secretLength: sec.length,
-        secretWhitespace: sec.length - sec.trim().length
-      })
+    const out = {
+      debug: true,
+      idPresent: !!id,
+      idLength: id.length,
+      idWhitespace: id.length - id.trim().length,
+      idHead: id.trim().slice(0, 7),
+      idTail: id.trim().slice(-4),
+      secretPresent: !!sec,
+      secretLength: sec.length,
+      secretWhitespace: sec.length - sec.trim().length
     };
+    // 實際打一次 TDX 登入，把原始狀態碼與回應內容完整回報
+    try {
+      const r = await fetch(AUTH_URL, {
+        method: 'POST',
+        headers: { 'content-type': 'application/x-www-form-urlencoded' },
+        body: 'grant_type=client_credentials' +
+          '&client_id=' + encodeURIComponent(id.trim()) +
+          '&client_secret=' + encodeURIComponent(sec.trim())
+      });
+      out.authStatus = r.status;
+      out.authContentType = r.headers.get('content-type') || null;
+      if (r.status === 200) {
+        out.authBody = 'OK_TOKEN_RECEIVED';
+      } else {
+        let body = '';
+        try { body = (await r.text()) || ''; } catch (e) { body = '<body read failed>'; }
+        out.authBodyLength = body.length;
+        out.authBody = body.slice(0, 500);
+      }
+    } catch (e) {
+      out.authError = String((e && e.message) || e);
+    }
+    return { statusCode: 200, headers, body: JSON.stringify(out) };
   }
 
   const lat = parseFloat(q.lat), lon = parseFloat(q.lon);
